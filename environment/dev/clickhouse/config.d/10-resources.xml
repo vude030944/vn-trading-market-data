@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!--
+  Keeps ClickHouse inside the container's 4G RAM / 2 core budget.
+  ClickHouse reads cgroup limits, so the ratios below are relative to 4G.
+-->
+<clickhouse>
+    <!-- Server-wide memory ceiling = 80% of 4G ~= 3.2G, leaving room for page cache -->
+    <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+
+    <!-- Caches: the 5G default mark cache is far too large for a 4G container -->
+    <mark_cache_size>536870912</mark_cache_size>                   <!-- 512 MiB -->
+    <uncompressed_cache_size>268435456</uncompressed_cache_size>   <!-- 256 MiB -->
+
+    <!--
+      DO NOT lower background_pool_size here.
+      ClickHouse enforces a sanity check: background_pool_size *
+      background_merges_mutations_concurrency_ratio must be >=
+      number_of_free_entries_in_pool_to_execute_mutation (default 20).
+      Setting background_pool_size=8 (8*2=16 < 20) makes the server DIE at
+      startup with BAD_ARGUMENTS. Keeping the default (16*2=32) is safe; actual
+      core usage is already bounded by the container's `cpus: 2.0`, so the extra
+      threads simply idle.
+    -->
+
+    <!-- Keep logs small: the 25G budget is for data, not for logs -->
+    <logger>
+        <level>information</level>
+        <size>200M</size>
+        <count>3</count>
+    </logger>
+</clickhouse>

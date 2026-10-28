@@ -1,0 +1,62 @@
+# ============================================================================
+# Observability — OPTIONAL, not started by default.
+#
+# Extra budget: ~0.8G RAM / 0.6 cores. Bring it up when you need the numbers;
+# take it down when Flink or ClickHouse needs the room.
+#
+#   docker compose up -d          # start
+#   docker compose down           # stop
+#
+# Once running, set OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 in
+# src/ingestion/.env and restart ingestion.
+# ============================================================================
+name: vnmd-dev-observability
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes: ["./otel-collector.yaml:/etc/otel/config.yaml:ro"]
+    networks: [vnmd-dev]
+    mem_limit: 256m
+    cpus: 0.25
+    expose: ["4317", "4318", "8889"]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=5GB
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${DATA_ROOT:-/home/vude030944/Data_HDD/vn-trading-market-data/dev}/prometheus:/prometheus
+    networks: [vnmd-dev]
+    mem_limit: 384m
+    cpus: 0.25
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: grafana
+    restart: unless-stopped
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${DATA_ROOT:-/home/vude030944/Data_HDD/vn-trading-market-data/dev}/grafana:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    networks: [vnmd-dev]
+    mem_limit: 256m
+    cpus: 0.25
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+networks:
+  vnmd-dev:
+    external: true

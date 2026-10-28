@@ -1,0 +1,119 @@
+# ============================================================================
+# Redpanda: 3 brokers — PROD
+#
+# THE CRITICAL DIFFERENCE FROM DEV: no `--mode dev-container`.
+# That mode disables fsync, meaning Redpanda reports "written" before the data is
+# actually on disk. A power loss then loses ACKNOWLEDGED data — unacceptable in
+# production however much faster it is.
+#
+# The three brokers should sit on THREE separate machines. This file runs them on
+# one host (or one Swarm node); for a real multi-host deployment split it into
+# three files and keep the `--seeds` list unchanged.
+# ============================================================================
+name: vnmd-prod-kafka
+
+x-redpanda-common: &redpanda-common
+  image: ${RP_IMAGE}
+  restart: unless-stopped
+  mem_limit: ${RP_MEM_LIMIT}
+  cpus: ${RP_CPUS}
+  networks: [vnmd-prod]
+  stop_grace_period: 60s
+  ulimits:
+    nofile: {soft: 65535, hard: 65535}
+  healthcheck:
+    test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 | grep -E 'Healthy:.+true'"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 60s
+  logging:
+    driver: json-file
+    options: {max-size: "100m", max-file: "5"}
+
+services:
+  redpanda-0:
+    <<: *redpanda-common
+    container_name: rp-prod-0
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-0:9092,external://${RP_ADVERTISE_HOST}:19092
+      - --rpc-addr=redpanda-0:33145
+      - --advertise-rpc-addr=redpanda-0:33145
+      - --schema-registry-addr=internal://0.0.0.0:8081
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=${RP_SMP}
+      - --memory=${RP_SEASTAR_MEM}
+      - --reserve-memory=0M
+      - --default-log-level=info
+      # No --mode dev-container: fsync is ON.
+    volumes:
+      - ${DATA_ROOT}/redpanda-0:/var/lib/redpanda/data
+    ports: ["19092:19092", "19644:9644"]
+
+  redpanda-1:
+    <<: *redpanda-common
+    container_name: rp-prod-1
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19093
+      - --advertise-kafka-addr=internal://redpanda-1:9092,external://${RP_ADVERTISE_HOST}:19093
+      - --rpc-addr=redpanda-1:33145
+      - --advertise-rpc-addr=redpanda-1:33145
+      - --schema-registry-addr=internal://0.0.0.0:8081
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=${RP_SMP}
+      - --memory=${RP_SEASTAR_MEM}
+      - --reserve-memory=0M
+      - --default-log-level=info
+    volumes:
+      - ${DATA_ROOT}/redpanda-1:/var/lib/redpanda/data
+    ports: ["19093:19093", "19645:9644"]
+
+  redpanda-2:
+    <<: *redpanda-common
+    container_name: rp-prod-2
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19094
+      - --advertise-kafka-addr=internal://redpanda-2:9092,external://${RP_ADVERTISE_HOST}:19094
+      - --rpc-addr=redpanda-2:33145
+      - --advertise-rpc-addr=redpanda-2:33145
+      - --schema-registry-addr=internal://0.0.0.0:8081
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=${RP_SMP}
+      - --memory=${RP_SEASTAR_MEM}
+      - --reserve-memory=0M
+      - --default-log-level=info
+    volumes:
+      - ${DATA_ROOT}/redpanda-2:/var/lib/redpanda/data
+    ports: ["19094:19094", "19646:9644"]
+
+  console:
+    image: ${CONSOLE_IMAGE}
+    container_name: rp-prod-console
+    restart: unless-stopped
+    mem_limit: ${CONSOLE_MEM_LIMIT}
+    cpus: ${CONSOLE_CPUS}
+    networks: [vnmd-prod]
+    # Do NOT publish this externally. The Console displays full message contents,
+    # so exposing it to the internet exposes the data. Reach it over an SSH tunnel
+    # or VPN.
+    expose: ["8080"]
+    environment:
+      KAFKA_BROKERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+      KAFKA_SASL_ENABLED: "${RP_SASL_ENABLED}"
+      KAFKA_SASL_USERNAME: "${RP_SUPERUSER}"
+      KAFKA_SASL_PASSWORD: "${RP_SUPERUSER_PASSWORD}"
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda-0:9644,http://redpanda-1:9644,http://redpanda-2:9644
+    depends_on:
+      redpanda-0: {condition: service_healthy}
+
+networks:
+  vnmd-prod:
+    external: true

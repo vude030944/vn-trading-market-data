@@ -1,0 +1,28 @@
+# Receives OTLP from the ingestion services and exposes it for Prometheus to scrape.
+receivers:
+  otlp:
+    protocols:
+      http: {endpoint: 0.0.0.0:4318}
+      grpc: {endpoint: 0.0.0.0:4317}
+
+processors:
+  batch: {timeout: 10s, send_batch_size: 1024}
+  # Guards against cardinality explosion: if anyone ever adds a symbol label it
+  # gets stripped here. The rule stands: NEVER put symbol/order_id in a metric label.
+  attributes/drop_high_cardinality:
+    actions:
+      - {key: symbol, action: delete}
+      - {key: order_id, action: delete}
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion: {enabled: true}
+  debug: {verbosity: basic}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [attributes/drop_high_cardinality, batch]
+      exporters: [prometheus]

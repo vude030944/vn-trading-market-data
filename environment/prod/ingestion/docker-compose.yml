@@ -1,0 +1,64 @@
+# ============================================================================
+# Ingestion — PROD
+#
+# WARNING: replicas MUST be 1 per broker.
+# Two replicas sharing credentials open two connections and publish EVERY message
+# twice. Those duplicates CANNOT be removed downstream, because the two
+# connections produce two different (partition, offset) pairs — by Kafka identity
+# they are two legitimately distinct records.
+# For more throughput use DNSE_SHARD_COUNT (only DNSE can be sharded).
+# ============================================================================
+name: vnmd-prod-ingestion
+
+x-common: &common
+  image: ${IMAGE}
+  restart: unless-stopped
+  networks: [vnmd-prod]
+  env_file: [.env]
+  stop_grace_period: 30s
+  volumes:
+    - ./symbols:/app/symbols:ro
+  healthcheck:
+    test: ["CMD", "python", "-m", "ingestion.core.health"]
+    interval: 15s
+    timeout: 5s
+    retries: 4
+    start_period: 60s
+  deploy:
+    replicas: 1
+    resources:
+      limits: {memory: 1g, cpus: "1.0"}
+  logging:
+    driver: json-file
+    options: {max-size: "100m", max-file: "5"}
+
+services:
+  ingest-ssi:
+    <<: *common
+    container_name: ingest-ssi-prod
+    command: ["--broker", "ssi"]
+    environment:
+      SERVICE_NAME: vnmd-ingestion
+
+  ingest-dnse:
+    <<: *common
+    container_name: ingest-dnse-prod
+    command: ["--broker", "dnse"]
+    environment:
+      SERVICE_NAME: vnmd-ingestion
+
+  ingest-tcbs:
+    <<: *common
+    container_name: ingest-tcbs-prod
+    command: ["--broker", "tcbs"]
+    # 3 feeds in one process (the one-token-one-connection constraint)
+    deploy:
+      replicas: 1
+      resources:
+        limits: {memory: 1536m, cpus: "1.5"}
+    environment:
+      SERVICE_NAME: vnmd-ingestion
+
+networks:
+  vnmd-prod:
+    external: true

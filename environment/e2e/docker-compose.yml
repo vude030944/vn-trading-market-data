@@ -1,0 +1,367 @@
+# ============================================================================
+# End-to-end test stack: the WHOLE pipeline fed by a broker simulator.
+#
+#   market-sim ──ws──► ingest-{ssi,dnse,tcbs} ──► Redpanda (3) ──► Flink job ──► ClickHouse
+#   (fake SSI/DNSE/TCBS)       (the real service)                  (real job)
+#
+# Self-contained on purpose: one file, one command, named volumes (no host paths,
+# works on Docker Desktop for Windows/macOS), no .env needed, no `make`.
+#
+#   docker compose -f environment/e2e/docker-compose.yml up -d --build
+#   docker compose -f environment/e2e/docker-compose.yml run --rm e2e-check
+#   docker compose -f environment/e2e/docker-compose.yml down -v
+#
+# MEMORY BUDGET — hard cgroup caps (mem_limit), total <= 20 GiB:
+#   market-sim 0.5 | redpanda 3 x 2.0 | console 0.4 | clickhouse 5.0
+#   flink jobmanager 1.5 | taskmanager 4.0 | ingestion 0.4 + 0.4 + 0.5
+#   = 18.7 GiB long-running; one-shot jobs run before/after and add <= 0.75
+# ============================================================================
+name: vnmd-e2e
+
+x-redpanda: &redpanda
+  image: redpandadata/redpanda:v26.1.16
+  mem_limit: 2g
+  cpus: 1.0
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 | grep -E 'Healthy:.+true'"]
+    interval: 10s
+    timeout: 10s
+    retries: 15
+    start_period: 20s
+
+x-ingestion: &ingestion
+  build: ../../src/ingestion
+  image: vnmd/ingestion:e2e
+  restart: unless-stopped
+  mem_limit: 400m
+  cpus: 0.5
+  depends_on:
+    market-sim: {condition: service_healthy}
+    topics: {condition: service_completed_successfully}
+  healthcheck:
+    test: ["CMD", "python", "-m", "ingestion.core.health"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 30s
+
+x-ingestion-env: &ingestion-env
+  KAFKA_BOOTSTRAP_SERVERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+  KAFKA_ACKS: all
+  KAFKA_COMPRESSION: zstd
+  LOG_LEVEL: INFO
+  RUN_ENV: e2e
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  SERVICE_NAME: vnmd-ingestion
+  # Every broker but the one this container serves is switched off.
+  SSI_ENABLED: "0"
+  DNSE_ENABLED: "0"
+  TCBS_ENABLED: "0"
+
+x-flink: &flink
+  build: ../../src/transform
+  image: vnmd/flink-transform:e2e
+  restart: unless-stopped
+  volumes:
+    - flink-data:/flink-data
+
+services:
+  # ------------------------------------------------------------ simulator
+  market-sim:
+    build: ../../src/simulator
+    image: vnmd/marketsim:e2e
+    container_name: e2e-market-sim
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+    environment:
+      SIM_TRADES_PER_SEC: ${SIM_TRADES_PER_SEC:-40}
+      SIM_MARKET_HOURS: ${SIM_MARKET_HOURS:-0}
+      SIM_CHAOS_DROP_EVERY_S: ${SIM_CHAOS_DROP_EVERY_S:-0}
+      SIM_SSI_API_KEY: e2e-ssi-key
+      SIM_SSI_API_SECRET: e2e-ssi-secret
+      SIM_DNSE_API_KEY: e2e-dnse-key
+      SIM_DNSE_API_SECRET: e2e-dnse-secret
+      SIM_TCBS_API_KEY: e2e-tcbs-key
+      SIM_TCBS_OTP: "111111"
+    ports:
+      - "18080:8080"     # /stats, /healthz, /control/{pause,resume}
+
+  # ---------------------------------------------------------------- kafka
+  redpanda-0:
+    <<: *redpanda
+    container_name: e2e-redpanda-0
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-0:9092,external://localhost:19092
+      - --rpc-addr=redpanda-0:33145
+      - --advertise-rpc-addr=redpanda-0:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1500M
+      - --reserve-memory=0M
+      - --default-log-level=warn
+    volumes: [rp0:/var/lib/redpanda/data]
+    ports: ["19092:19092"]
+
+  redpanda-1:
+    <<: *redpanda
+    container_name: e2e-redpanda-1
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda-1:9092
+      - --rpc-addr=redpanda-1:33145
+      - --advertise-rpc-addr=redpanda-1:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1500M
+      - --reserve-memory=0M
+      - --default-log-level=warn
+    volumes: [rp1:/var/lib/redpanda/data]
+
+  redpanda-2:
+    <<: *redpanda
+    container_name: e2e-redpanda-2
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda-2:9092
+      - --rpc-addr=redpanda-2:33145
+      - --advertise-rpc-addr=redpanda-2:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1500M
+      - --reserve-memory=0M
+      - --default-log-level=warn
+    volumes: [rp2:/var/lib/redpanda/data]
+
+  # Same five topics and partition counts as environment/dev/kafka/bootstrap.sh,
+  # with a 1-day / 256 MiB retention that suits a disposable test volume.
+  topics:
+    image: redpandadata/redpanda:v26.1.16
+    container_name: e2e-topics
+    mem_limit: 256m
+    restart: "no"
+    depends_on:
+      redpanda-0: {condition: service_healthy}
+      redpanda-1: {condition: service_healthy}
+      redpanda-2: {condition: service_healthy}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        B="-X brokers=redpanda-0:9092,redpanda-1:9092,redpanda-2:9092"
+        for t in tcbs.data.raw.stock:12 tcbs.data.raw.future:3 tcbs.data.raw.ouranos:12 \
+                 ssi.data.raw.market:12 dnse.data.raw.market:12; do
+          rpk topic create "$${t%%:*}" -p "$${t##*:}" -r 3 $$B \
+            -c retention.ms=86400000 -c retention.bytes=268435456 \
+            -c compression.type=producer || true
+        done
+        rpk topic list $$B
+
+  console:
+    image: redpandadata/console:v3.10.0
+    container_name: e2e-console
+    restart: unless-stopped
+    mem_limit: 400m
+    cpus: 0.25
+    environment:
+      KAFKA_BROKERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+    ports: ["18088:8080"]
+    depends_on:
+      topics: {condition: service_completed_successfully}
+
+  # ----------------------------------------------------------- clickhouse
+  clickhouse:
+    image: clickhouse:26.7.3.19
+    container_name: e2e-clickhouse
+    restart: unless-stopped
+    mem_limit: 5g
+    cpus: 2.0
+    environment:
+      CLICKHOUSE_DB: vnmd
+      CLICKHOUSE_USER: vnmd
+      CLICKHOUSE_PASSWORD: vnmd_e2e_password
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      # Individual files, never the whole directories (environment/README.md, trap 1).
+      - ../dev/clickhouse/config.d/10-resources.xml:/etc/clickhouse-server/config.d/10-resources.xml:ro
+      - ../dev/clickhouse/users.d/10-profile.xml:/etc/clickhouse-server/users.d/10-profile.xml:ro
+    ports: ["18123:8123"]
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user vnmd --password vnmd_e2e_password --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # apply.sh exactly as in dev/prod, pointed at the server over the network.
+  ch-schema:
+    image: clickhouse:26.7.3.19
+    container_name: e2e-ch-schema
+    mem_limit: 512m
+    restart: "no"
+    depends_on:
+      clickhouse: {condition: service_healthy}
+    environment:
+      CH_HOST: clickhouse
+      CH_USER: vnmd
+      CH_PASSWORD: vnmd_e2e_password
+    volumes:
+      - ../../src/transform:/transform:ro
+    entrypoint: ["bash", "/transform/apply.sh"]
+
+  # ---------------------------------------------------------------- flink
+  flink-jobmanager:
+    <<: *flink
+    container_name: e2e-flink-jobmanager
+    command: jobmanager
+    mem_limit: 1536m
+    cpus: 0.5
+    ports: ["18081:8081"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1280m
+        rest.address: 0.0.0.0
+        rest.bind-address: 0.0.0.0
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  flink-taskmanager:
+    <<: *flink
+    container_name: e2e-flink-taskmanager
+    command: taskmanager
+    mem_limit: 4g
+    cpus: 2.0
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 3584m
+        taskmanager.numberOfTaskSlots: 2
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+    depends_on:
+      flink-jobmanager: {condition: service_healthy}
+
+  # Uploads the baked-in jar over the REST API and runs it — once: a job already
+  # running is left alone, so `up` can be repeated safely.
+  flink-submit:
+    image: vnmd/flink-transform:e2e
+    container_name: e2e-flink-submit
+    mem_limit: 256m
+    restart: "no"
+    depends_on:
+      flink-jobmanager: {condition: service_healthy}
+      flink-taskmanager: {condition: service_started}
+      ch-schema: {condition: service_completed_successfully}
+      topics: {condition: service_completed_successfully}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        JM=http://flink-jobmanager:8081
+        if curl -fsS $$JM/jobs/overview | tr '{' '\n' | grep 'vnmd-transform' \
+             | grep -qE '"state":"(RUNNING|CREATED|INITIALIZING|RESTARTING)"'; then
+          echo "vnmd-transform already running — nothing to do"; exit 0
+        fi
+        JAR=$$(curl -fsS -X POST -F "jarfile=@/opt/flink/usrlib/vnmd-transform.jar" $$JM/jars/upload \
+               | sed -E 's#.*"filename":"[^"]*/([^"/]+)".*#\1#')
+        echo "uploaded $$JAR"
+        curl -fsS -X POST -H 'Content-Type: application/json' "$$JM/jars/$$JAR/run" -d '{
+          "programArgsList": [
+            "--kafka-servers", "redpanda-0:9092,redpanda-1:9092,redpanda-2:9092",
+            "--clickhouse-url", "http://clickhouse:8123",
+            "--clickhouse-user", "vnmd",
+            "--clickhouse-password", "vnmd_e2e_password",
+            "--starting-offsets", "earliest"
+          ]}'
+        echo; echo "submitted"
+
+  # ------------------------------------------------------------ ingestion
+  # The real ingestion image, pointed at the simulator instead of the brokers.
+  ingest-ssi:
+    <<: *ingestion
+    container_name: e2e-ingest-ssi
+    command: ["--broker", "ssi"]
+    environment:
+      <<: *ingestion-env
+      SSI_ENABLED: "1"
+      SSI_API_URL: http://market-sim:8001
+      SSI_STREAM_URL: ws://market-sim:8001/ws/v3
+      SSI_API_KEY: e2e-ssi-key
+      SSI_API_SECRET: e2e-ssi-secret
+      SSI_AUTH_MODE: query
+
+  ingest-dnse:
+    <<: *ingestion
+    container_name: e2e-ingest-dnse
+    command: ["--broker", "dnse"]
+    environment:
+      <<: *ingestion-env
+      DNSE_ENABLED: "1"
+      DNSE_STREAM_URL: ws://market-sim:8002/v1/stream
+      DNSE_API_KEY: e2e-dnse-key
+      DNSE_API_SECRET: e2e-dnse-secret
+      DNSE_ENCODING: json
+      DNSE_CHANNELS: tick_extra,top_price,foreign,session,market_index,estimated_market_index,ohlc_closed,security_definition
+      DNSE_MARKET_INDICES: VNINDEX,VN30,HNX,UPCOM
+      DNSE_SYMBOLS: ACB,BCM,BID,BVH,CTG,FPT,GAS,GVR,HDB,HPG,MBB,MSN,MWG,PLX,POW,SAB,SHB,SSB,SSI,STB,TCB,TPB,VCB,VHM,VIB,VIC,VJC,VNM,VPB,VRE,DGC,DXG,KDH,PNJ,VND,VCI,REE,GEX,PDR,NVL,SHS,PVS,CEO,IDC,MBS,NVB,TNG,VCS,PVI,HUT,BSR,VEA,ACV,MCH,QNS,OIL,VGI,FOX,41I1G8000,41I1G9000,41I1GC000,VN30F1M,VN30F2M,VN30F1Q
+
+  ingest-tcbs:
+    <<: *ingestion
+    container_name: e2e-ingest-tcbs
+    command: ["--broker", "tcbs"]
+    mem_limit: 512m
+    environment:
+      <<: *ingestion-env
+      TCBS_ENABLED: "1"
+      TCBS_REST_URL: http://market-sim:8003
+      TCBS_WS_URL: ws://market-sim:8003
+      # The REAL token flow: apiKey + OTP exchanged over REST at startup.
+      TCBS_API_KEY: e2e-tcbs-key
+      TCBS_OTP: "111111"
+      TCBS_FUTURES_SYMBOLS: 41I1G8000,41I1G9000,41I1GC000
+      TCBS_OURANOS_TICKERS: ACB,BCM,BID,BVH,CTG,FPT,GAS,GVR,HDB,HPG,MBB,MSN,MWG,PLX,POW,SAB,SHB,SSB,SSI,STB,TCB,TPB,VCB,VHM,VIB,VIC,VJC,VNM,VPB,VRE
+
+  # --------------------------------------------------------------- checks
+  # On demand:  docker compose -f environment/e2e/docker-compose.yml run --rm e2e-check
+  e2e-check:
+    image: python:3.12-slim
+    container_name: e2e-check
+    profiles: ["check"]
+    mem_limit: 256m
+    volumes:
+      - ./e2e_check.py:/e2e_check.py:ro
+    environment:
+      SIM_URL: http://market-sim:8080
+      CH_URL: http://clickhouse:8123
+      CH_USER: vnmd
+      CH_PASSWORD: vnmd_e2e_password
+    entrypoint: ["python", "/e2e_check.py"]
+
+volumes:
+  rp0: {}
+  rp1: {}
+  rp2: {}
+  ch-data: {}
+  flink-data: {}

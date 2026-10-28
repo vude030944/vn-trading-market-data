@@ -1,0 +1,17 @@
+[project]
+name = "vnmd-marketsim"
+version = "0.1.0"
+description = "Protocol-faithful SSI / DNSE / TCBS WebSocket simulators for end-to-end tests"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.10",
+    "msgpack>=1.0.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

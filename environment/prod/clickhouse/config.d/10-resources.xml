@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+    <mark_cache_size>4294967296</mark_cache_size>            <!-- 4 GiB -->
+    <uncompressed_cache_size>2147483648</uncompressed_cache_size>
+
+    <!-- Do NOT lower background_pool_size: a sanity check ties it to
+         number_of_free_entries_in_pool_to_execute_mutation (default 20).
+         Setting 8 (8x2=16 < 20) kills the server at startup. -->
+
+    <logger>
+        <level>information</level>
+        <size>500M</size>
+        <count>10</count>
+    </logger>
+
+    <!-- Keep the query log for incident forensics, with a TTL so it cannot eat the disk. -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+</clickhouse>

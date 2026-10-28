@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push: {branches: [main]}
+  pull_request:
+
+jobs:
+  test:
+    name: Test ingestion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv .venv
+        working-directory: src/ingestion
+      # cramjam, NOT zstandard — aiokafka >=0.11 uses cramjam for zstd
+      - run: |
+          uv pip install -p .venv websockets aiokafka cramjam httpx uvloop \
+            python-dotenv opentelemetry-api opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http msgpack pytest pytest-asyncio
+        working-directory: src/ingestion
+      - run: .venv/bin/python -m pytest tests -q
+        working-directory: src/ingestion
+
+  simulator:
+    name: Ingestion against the broker simulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv .venv
+        working-directory: src/simulator
+      - run: |
+          uv pip install -p .venv aiohttp msgpack websockets aiokafka cramjam httpx \
+            python-dotenv opentelemetry-api opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http pytest pytest-asyncio
+        working-directory: src/simulator
+      - run: .venv/bin/python -m pytest tests -q
+        working-directory: src/simulator
+
+  sql:
+    name: Verify the transform schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No Kafka engine any more, so clickhouse-local can apply the whole schema
+      # exactly as apply.sh does — twice, to prove it is idempotent.
+      - run: curl -sSL https://clickhouse.com/ | sh
+      - name: Apply the schema to an empty database
+        run: |
+          set -e
+          cd src/transform/sql
+          for pass in 1 2; do
+            for f in 00_database.sql 10_landing.sql 20_targets.sql 90_views.sql; do
+              ../../../clickhouse local --path /tmp/ch --multiquery < $f
+            done
+          done
+          echo "schema applied cleanly"
+
+  flink:
+    name: Test the Flink transform job
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "21"}
+      - run: sh ./gradlew --no-daemon test shadowJar
+        working-directory: src/transform
+
+  lint:
+    name: Compose and shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 -c "
+          import yaml, glob
+          for f in glob.glob('environment/*/*/docker-compose.yml') + glob.glob('environment/*/docker-compose.yml') + glob.glob('src/*/docker-compose.yml'):
+              yaml.safe_load(open(f)); print('OK', f)"
+      - run: bash -n environment/dev/kafka/bootstrap.sh environment/prod/kafka/bootstrap.sh src/transform/apply.sh

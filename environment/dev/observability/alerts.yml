@@ -1,0 +1,52 @@
+groups:
+  - name: ingestion
+    rules:
+      # Dead feed. NOTE: only fires DURING TRADING HOURS — outside them every feed
+      # is silent yet healthy, which all three brokers state explicitly in their docs.
+      # 02:00-07:45 UTC ~ 09:00-14:45 Vietnam time, Monday to Friday.
+      - alert: FeedStale
+        expr: |
+          max by (source, feed) (market_data_last_message_age_ms) > 60000
+          and on() (hour() >= 2 and hour() < 8 and day_of_week() >= 1 and day_of_week() <= 5)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Feed {{ $labels.source }}/{{ $labels.feed }} silent for over 60s during the session"
+
+      - alert: ReconnectStorm
+        expr: sum by (source, feed) (increase(market_data_reconnects_total[10m])) > 5
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.feed }} reconnected {{ $value }} times in 10 minutes"
+
+      # Receiving but not publishing: Kafka is in trouble and data is being lost.
+      - alert: PublishStalled
+        expr: |
+          sum by (source, feed) (rate(market_data_messages_total{status="received"}[2m])) > 0
+          and sum by (source, feed) (rate(market_data_messages_total{status="published"}[2m])) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: "{{ $labels.feed }} is receiving but NOT publishing to Kafka"}
+
+      - alert: KafkaErrors
+        expr: sum by (source, feed) (rate(market_data_kafka_errors_total[5m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "Kafka errors on {{ $labels.feed }}"}
+
+      # The broker emitted an unknown wire code -> the documentation went stale.
+      # This is exactly how TCBS's s|42 stayed missed for a long time.
+      - alert: MalformedFrames
+        expr: sum by (source, feed) (rate(market_data_messages_total{status="dropped", reason="malformed"}[10m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "{{ $labels.feed }} has unparseable frames — the broker may have changed protocol"}
+
+      - alert: PublishLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, source, feed) (rate(market_data_publish_latency_ms_bucket[5m]))) > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "p95 ws->kafka latency for {{ $labels.feed }} exceeds 1s"}

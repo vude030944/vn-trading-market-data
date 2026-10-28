@@ -1,0 +1,81 @@
+# ============================================================================
+# Ingestion — 3 services, the SAME image, differing only by --broker.
+#
+# WHY THIS SPLIT:
+#   tcbs : ONE service hosting 3 feeds (thesis normal + derivative + ouranos).
+#          Mandatory: TCBS ties one token to one connection, so all three feeds
+#          must share a token inside one process. Within the process they remain
+#          3 independent tasks — one dying does not take the others down.
+#   ssi  : 1 service, because SSI has exactly one WebSocket connection (DATA).
+#   dnse : 1 service, but horizontally scalable via DNSE_SHARD_COUNT once the
+#          universe exceeds `subscriptions_max` (currently 100) — see README.
+#
+# Budget: 3 x 384M / 0.35 cores = 1.13G / 1.05 cores.
+# ============================================================================
+name: vnmd-ingestion
+
+x-ingestion-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: vnmd/ingestion:0.1.0
+  restart: unless-stopped
+  networks: [vnmd-dev]
+  mem_limit: 384m
+  cpus: 0.35
+  stop_grace_period: 30s     # enough to flush Kafka (KAFKA_FLUSH_TIMEOUT_S=15)
+  env_file: [.env]
+  environment: &common-env
+    # Talk to the brokers by container name on the vnmd-dev network, NOT via
+    # localhost:19092 (those ports are only for clients running on the host).
+    KAFKA_BOOTSTRAP_SERVERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    DEVELOPMENT_ENVIRONMENT: ${RUN_ENV:-dev}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # Health means "every feed completed its handshake", NOT "data is flowing".
+  # Outside trading hours feeds are silent yet healthy — a data-based criterion
+  # would restart the container all night.
+  healthcheck:
+    test: ["CMD", "python", "-m", "ingestion.core.health"]
+    interval: 15s
+    timeout: 5s
+    retries: 4
+    start_period: 40s
+  logging:
+    driver: json-file
+    options: {max-size: "50m", max-file: "3"}
+
+services:
+  ingest-ssi:
+    <<: *common
+    container_name: ingest-ssi
+    command: ["--broker", "ssi"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: vnmd-ingestion
+
+  ingest-dnse:
+    <<: *common
+    container_name: ingest-dnse
+    command: ["--broker", "dnse"]
+    environment:
+      <<: *common-env
+      SERVICE_NAME: vnmd-ingestion
+      # Horizontal scaling: raise SHARD_COUNT and clone the service with a different SHARD_INDEX.
+      DNSE_SHARD_INDEX: ${DNSE_SHARD_INDEX:-0}
+      DNSE_SHARD_COUNT: ${DNSE_SHARD_COUNT:-1}
+
+  ingest-tcbs:
+    <<: *common
+    container_name: ingest-tcbs
+    command: ["--broker", "tcbs"]
+    # 3 feeds in one process -> needs more RAM/CPU than the other two services
+    mem_limit: 512m
+    cpus: 0.5
+    environment:
+      <<: *common-env
+      SERVICE_NAME: vnmd-ingestion
+
+networks:
+  vnmd-dev:
+    external: true

@@ -1,0 +1,35 @@
+# VN30 basket — a SEED list for experimentation, NOT an authoritative source.
+#
+# HOSE reviews VN30 membership twice a year (January and July), so this file will
+# go stale. Use scripts/fetch_symbols.py to pull the real universe from a broker
+# API before running in production.
+ACB
+BCM
+BID
+BVH
+CTG
+FPT
+GAS
+GVR
+HDB
+HPG
+MBB
+MSN
+MWG
+PLX
+POW
+SAB
+SHB
+SSB
+SSI
+STB
+TCB
+TPB
+VCB
+VHM
+VIB
+VIC
+VJC
+VNM
+VPB
+VRE

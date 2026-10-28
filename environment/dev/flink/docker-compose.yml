@@ -1,0 +1,70 @@
+# ============================================================================
+# Flink 2.3 (Java 21) — 1 JobManager + 1 TaskManager, session cluster mode
+#
+# Budget:  4.7G RAM  |  2.5 cores  |  ~5G disk (checkpoints/savepoints)
+#
+# Flink 2.x uses `config.yaml` (no more `flink-conf.yaml`). FLINK_PROPERTIES
+# still works: the entrypoint reads each `key: value` line and writes it into
+# config.yaml. NOTE: the entrypoint strips ALL whitespace from each line, so a
+# value may not contain spaces.
+# ============================================================================
+name: vnmd-dev-flink
+
+x-flink-common: &flink-common
+  image: ${FLINK_IMAGE}
+  restart: unless-stopped
+  networks: [vnmd-dev]
+  volumes:
+    # Drop the job jar (fat jar / shadowJar) into ./jobs and submit from inside the container
+    - ./jobs:/opt/flink/jobs
+    - ${DATA_ROOT}/flink:/flink-data
+
+services:
+  # ----------------------------------------------------------- job manager
+  jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
+    mem_limit: ${JM_MEM_LIMIT}
+    cpus: ${JM_CPUS}
+    ports:
+      - "8081:8081"   # Web UI + REST API (job submission goes here)
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        jobmanager.memory.process.size: ${JM_PROCESS_SIZE}
+        rest.address: 0.0.0.0
+        rest.bind-address: 0.0.0.0
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+        web.upload.dir: /flink-data/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------- task manager
+  taskmanager:
+    <<: *flink-common
+    container_name: flink-taskmanager
+    command: taskmanager
+    mem_limit: ${TM_MEM_LIMIT}
+    cpus: ${TM_CPUS}
+    scale: 1
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.memory.process.size: ${TM_PROCESS_SIZE}
+        taskmanager.numberOfTaskSlots: ${TM_SLOTS}
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+    depends_on:
+      jobmanager: {condition: service_healthy}
+
+networks:
+  vnmd-dev:
+    external: true
