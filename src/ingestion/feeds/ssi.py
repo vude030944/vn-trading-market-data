@@ -209,6 +209,11 @@ class SSISpec:
                 }),))
             return Handled()
 
+        # SUBSCRIBE acknowledgement (method=SUBSCRIBE, status=ok, no topic) —
+        # not data, not an error. Swallow it silently instead of flagging malformed.
+        if msg.get("method") == "SUBSCRIBE":
+            return Handled()
+
         topic = msg.get("topic")
         if not topic:
             return Handled(malformed=True)

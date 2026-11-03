@@ -4,6 +4,9 @@
 !**/.env.example
 *.pem
 *.key
+service-account-key.json
+service_account*.json
+*service-account*.json
 
 # Python
 __pycache__/
@@ -24,6 +27,8 @@ src/ingestion/symbols/tcbs.txt
 src/transform/build/
 src/transform/.gradle/
 environment/*/flink/jobs/
+# Root copy of the built jar (deployed to VM as environment/prod-vm/flink-jobs/)
+vnmd-transform.jar
 
 # Data (lives outside the repo on Data_HDD — this is a guard in case someone points it here)
 data/

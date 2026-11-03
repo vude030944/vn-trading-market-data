@@ -1,0 +1,288 @@
+name: vnmd-prod
+
+networks:
+  vnmd-prod:
+    name: vnmd-prod
+
+x-redpanda: &redpanda
+  image: redpandadata/redpanda:v26.2.6
+  restart: unless-stopped
+  networks: [vnmd-prod]
+  stop_grace_period: 60s
+  ulimits:
+    nofile: {soft: 65535, hard: 65535}
+  healthcheck:
+    test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 | grep -E 'Healthy:.+true'"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 60s
+  logging:
+    driver: json-file
+    options: {max-size: "100m", max-file: "5"}
+
+x-ingestion: &ingestion
+  build: ../../src/ingestion
+  image: vnmd/ingestion:prod
+  restart: unless-stopped
+  networks: [vnmd-prod]
+  mem_limit: 512m
+  cpus: 1.0
+  depends_on:
+    redpanda-0: {condition: service_healthy}
+    redpanda-1: {condition: service_healthy}
+    redpanda-2: {condition: service_healthy}
+  env_file: [.env]
+  healthcheck:
+    test: ["CMD", "python", "-m", "ingestion.core.health"]
+    interval: 15s
+    timeout: 5s
+    retries: 4
+    start_period: 60s
+  logging:
+    driver: json-file
+    options: {max-size: "100m", max-file: "5"}
+
+services:
+  redpanda-0:
+    <<: *redpanda
+    container_name: rp-prod-0
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-0:9092,external://34.87.180.247:19092
+      - --rpc-addr=redpanda-0:33145
+      - --advertise-rpc-addr=redpanda-0:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=2
+      - --memory=2500M
+      - --reserve-memory=0M
+      - --default-log-level=info
+    volumes: [rp0:/var/lib/redpanda/data]
+    ports: ["19092:19092", "19644:9644"]
+
+  redpanda-1:
+    <<: *redpanda
+    container_name: rp-prod-1
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19093
+      - --advertise-kafka-addr=internal://redpanda-1:9092,external://34.87.180.247:19093
+      - --rpc-addr=redpanda-1:33145
+      - --advertise-rpc-addr=redpanda-1:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=2
+      - --memory=2500M
+      - --reserve-memory=0M
+      - --default-log-level=info
+    volumes: [rp1:/var/lib/redpanda/data]
+    ports: ["19093:19093", "19645:9644"]
+
+  redpanda-2:
+    <<: *redpanda
+    container_name: rp-prod-2
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19094
+      - --advertise-kafka-addr=internal://redpanda-2:9092,external://34.87.180.247:19094
+      - --rpc-addr=redpanda-2:33145
+      - --advertise-rpc-addr=redpanda-2:33145
+      - --seeds=redpanda-0:33145,redpanda-1:33145,redpanda-2:33145
+      - --smp=2
+      - --memory=2500M
+      - --reserve-memory=0M
+      - --default-log-level=info
+    volumes: [rp2:/var/lib/redpanda/data]
+    ports: ["19094:19094", "19646:9644"]
+
+  topics:
+    image: redpandadata/redpanda:v26.2.6
+    container_name: prod-topics
+    networks: [vnmd-prod]
+    restart: "no"
+    depends_on:
+      redpanda-0: {condition: service_healthy}
+      redpanda-1: {condition: service_healthy}
+      redpanda-2: {condition: service_healthy}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        B="-X brokers=redpanda-0:9092,redpanda-1:9092,redpanda-2:9092"
+        for t in tcbs.data.raw.stock:12 tcbs.data.raw.future:3 tcbs.data.raw.ouranos:12 ssi.data.raw.market:12 dnse.data.raw.market:12; do
+          rpk topic create "$${t%%:*}" -p "$${t##*:}" -r 3 $$B -c retention.bytes=2147483648 -c retention.ms=604800000 -c segment.bytes=67108864 -c compression.type=producer || true
+        done
+        rpk topic list $$B
+
+  console:
+    image: redpandadata/console:v3.13.1
+    container_name: rp-prod-console
+    restart: unless-stopped
+    networks: [vnmd-prod]
+    mem_limit: 512m
+    cpus: 0.5
+    expose: ["8080"]
+    ports: ["8080:8080"]
+    environment:
+      KAFKA_BROKERS: redpanda-0:9092,redpanda-1:9092,redpanda-2:9092
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda-0:9644,http://redpanda-1:9644,http://redpanda-2:9644
+    depends_on:
+      redpanda-0: {condition: service_healthy}
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.9.27.3
+    container_name: ch-prod
+    restart: unless-stopped
+    networks: [vnmd-prod]
+    mem_limit: 8g
+    cpus: 4.0
+    stop_grace_period: 120s
+    expose: ["8123", "9000"]
+    ports: ["8123:8123", "9000:9000"]
+    environment:
+      CLICKHOUSE_DB: ${CH_DB}
+      CLICKHOUSE_USER: ${CH_USER}
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ch-data:/var/lib/clickhouse
+      - ch-logs:/var/log/clickhouse-server
+      - ./clickhouse-config/10-resources.xml:/etc/clickhouse-server/config.d/10-resources.xml:ro
+      - ./clickhouse-config/users.d:/etc/clickhouse-server/users.d
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user=$${CLICKHOUSE_USER} --password=$${CLICKHOUSE_PASSWORD} --query='SELECT 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "100m", max-file: "5"}
+
+  ch-schema:
+    image: clickhouse/clickhouse-server:26.9.27.3
+    container_name: prod-ch-schema
+    networks: [vnmd-prod]
+    restart: "no"
+    depends_on:
+      clickhouse: {condition: service_healthy}
+    environment:
+      CH_HOST: clickhouse
+      CH_USER: ${CH_USER}
+      CH_PASSWORD: ${CH_PASSWORD}
+    volumes:
+      - ./transform:/transform:ro
+    entrypoint: ["bash", "/transform/apply.sh"]
+
+  flink-jobmanager:
+    image: apache/flink:2.3-scala_2.12-java21
+    container_name: flink-jm-prod
+    command: jobmanager
+    restart: unless-stopped
+    networks: [vnmd-prod]
+    mem_limit: 2g
+    cpus: 1.0
+    ports: ["8081:8081"]
+    volumes:
+      - flink-data:/flink-data
+      - ./flink-jobs:/opt/flink/usrlib:ro
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1600m
+        rest.address: 0.0.0.0
+        rest.bind-address: 0.0.0.0
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+        web.upload.dir: /flink-data/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/overview || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  flink-taskmanager:
+    image: apache/flink:2.3-scala_2.12-java21
+    container_name: flink-tm-prod
+    command: taskmanager
+    restart: unless-stopped
+    networks: [vnmd-prod]
+    mem_limit: 8g
+    cpus: 4.0
+    volumes:
+      - flink-data:/flink-data
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 7168m
+        taskmanager.numberOfTaskSlots: 2
+        execution.checkpointing.dir: file:///flink-data/checkpoints
+        execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+        state.backend.type: rocksdb
+    depends_on:
+      flink-jobmanager: {condition: service_healthy}
+
+  flink-submit:
+    image: apache/flink:2.3-scala_2.12-java21
+    container_name: prod-flink-submit
+    networks: [vnmd-prod]
+    restart: "no"
+    depends_on:
+      flink-jobmanager: {condition: service_healthy}
+      flink-taskmanager: {condition: service_started}
+      ch-schema: {condition: service_completed_successfully}
+      topics: {condition: service_completed_successfully}
+    volumes:
+      - ./flink-jobs:/jars:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        JM=http://flink-jobmanager:8081
+        if curl -fsS $$JM/jobs/overview | tr '{' '\n' | grep 'vnmd-transform' | grep -qE '"state":"(RUNNING|CREATED|INITIALIZING|RESTARTING)"'; then
+          echo "vnmd-transform already running — nothing to do"; exit 0
+        fi
+        JAR=$$(curl -fsS -X POST -F "jarfile=@/jars/vnmd-transform.jar" $$JM/jars/upload | sed -E 's#.*"filename":"[^"]*/([^"/]+)".*#\1#')
+        echo "uploaded $$JAR"
+        curl -fsS -X POST -H 'Content-Type: application/json' "$$JM/jars/$$JAR/run" -d "{
+          \"programArgsList\": [
+            \"--kafka-servers\", \"redpanda-0:9092,redpanda-1:9092,redpanda-2:9092\",
+            \"--clickhouse-url\", \"http://clickhouse:8123\",
+            \"--clickhouse-user\", \"${CH_USER}\",
+            \"--clickhouse-password\", \"${CH_PASSWORD}\",
+            \"--starting-offsets\", \"earliest\"
+          ]}"
+        echo; echo "submitted"
+
+  ingest-ssi:
+    <<: *ingestion
+    container_name: ingest-ssi-prod
+    command: ["--broker", "ssi"]
+
+  ingest-dnse:
+    <<: *ingestion
+    container_name: ingest-dnse-prod
+    command: ["--broker", "dnse"]
+
+  ingest-tcbs:
+    <<: *ingestion
+    container_name: ingest-tcbs-prod
+    command: ["--broker", "tcbs"]
+    mem_limit: 1536m
+    cpus: 1.5
+
+volumes:
+  rp0: {}
+  rp1: {}
+  rp2: {}
+  ch-data: {}
+  ch-logs: {}
+  flink-data: {}

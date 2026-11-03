@@ -183,7 +183,7 @@ class DNSESpec:
                 return Handled(replies=(self._pong(msg),))
             if action == "error":
                 log.error("DNSE reported an error", extra={"code": msg.get("code"),
-                                                          "message": msg.get("message")})
+                                                          "server_message": msg.get("message")})
             elif action == "connection_expired":
                 # Normal, not an error: the 8-hour limit. The engine reconnects.
                 log.info("DNSE signalled connection expiry — will reconnect",

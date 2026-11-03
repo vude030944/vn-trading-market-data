@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- One bad SELECT must not be able to take the server down. -->
+            <max_memory_usage>8589934592</max_memory_usage>          <!-- 8 GiB/query -->
+            <max_bytes_before_external_group_by>4294967296</max_bytes_before_external_group_by>
+            <max_bytes_before_external_sort>4294967296</max_bytes_before_external_sort>
+            <max_execution_time>600</max_execution_time>
+            <max_concurrent_queries_for_user>20</max_concurrent_queries_for_user>
+            <readonly>0</readonly>
+        </default>
+        <!-- Profile for dashboards/BI: read-only, tighter limits. -->
+        <readonly_user>
+            <max_memory_usage>2147483648</max_memory_usage>
+            <max_execution_time>60</max_execution_time>
+            <readonly>1</readonly>
+        </readonly_user>
+    </profiles>
+</clickhouse>

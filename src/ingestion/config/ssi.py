@@ -84,7 +84,7 @@ class SSIConfig:
     #   frame  : send an auth JSON as the first message and await the reply
     auth_mode: str = field(default_factory=lambda: env_str("SSI_AUTH_MODE", "query"))
     auth_query_param: str = field(
-        default_factory=lambda: env_str("SSI_AUTH_QUERY_PARAM", "access_token")
+        default_factory=lambda: env_str("SSI_AUTH_QUERY_PARAM", "token")
     )
 
     # -- Subscriptions -----------------------------------------------------
