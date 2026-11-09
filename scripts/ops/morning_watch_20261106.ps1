@@ -1,0 +1,44 @@
+# Morning open watch 2026-11-06: hold until 09:06, check all 3 feeds every 60s.
+$ErrorActionPreference = 'Continue'
+$sshKey = Join-Path $env:USERPROFILE '.ssh\cursor_vm'
+$sshBase = @('-i', $sshKey, '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=15', 'vuloc@34.87.180.247')
+$deadline = Get-Date -Date '2026-11-06 09:06:00'
+Write-Output "WATCH-START $(Get-Date -Format 'HH:mm:ss') deadline $($deadline.ToString('HH:mm:ss'))"
+while ((Get-Date) -lt $deadline) {
+  $t = (Get-Date).ToString('HH:mm:ss')
+  try {
+    $ssi = ssh @sshBase 'docker exec ingest-ssi-prod cat /tmp/health/ingestion.json' 2>&1 | Out-String
+    $dnse = ssh @sshBase 'docker exec ingest-dnse-prod cat /tmp/health/ingestion.json' 2>&1 | Out-String
+    $tcbs = ssh @sshBase 'docker exec ingest-tcbs-prod cat /tmp/health/ingestion.json' 2>&1 | Out-String
+    $ssiOk = ($ssi -match '"connected": true')
+    $dnseOk = ($dnse -match '"connected": true')
+    $tcbsOk = ($tcbs -match '"connected": true')
+    $bad = @()
+    if (-not $ssiOk) { $bad += 'SSI-DOWN' }
+    if (-not $dnseOk) { $bad += 'DNSE-DOWN' }
+    if (-not $tcbsOk) { $bad += 'TCBS-DOWN' }
+    if ($bad.Count -gt 0) {
+      Write-Output "$t ALERT $($bad -join ',')"
+      Write-Output "  ssi: $($ssi.Substring(0, [Math]::Min(200, $ssi.Length)))"
+      Write-Output "  dnse: $($dnse.Substring(0, [Math]::Min(200, $dnse.Length)))"
+      Write-Output "  tcbs: $($tcbs.Substring(0, [Math]::Min(200, $tcbs.Length)))"
+      if (-not $ssiOk) {
+        ssh @sshBase 'cd ~/vnmd/environment/prod-vm && docker compose restart ingest-ssi' 2>&1 | ForEach-Object { Write-Output "  heal-ssi: $_" }
+      }
+      if (-not $dnseOk) {
+        ssh @sshBase 'cd ~/vnmd/environment/prod-vm && docker compose restart ingest-dnse' 2>&1 | ForEach-Object { Write-Output "  heal-dnse: $_" }
+      }
+    } else {
+      Write-Output "$t tick ok ssi+dnse+tcbs connected"
+    }
+  } catch {
+    Write-Output "$t WATCH-ERR $($_.Exception.Message)"
+  }
+  $remain = ($deadline - (Get-Date)).TotalSeconds
+  if ($remain -le 0) { break }
+  if ($remain -gt 60) { $remain = 60 }
+  Start-Sleep -Seconds ([int]$remain)
+}
+Write-Output "WATCH-WINDOW-DONE $(Get-Date -Format 'HH:mm:ss')"
+$counts = ssh @sshBase 'docker exec ch-prod clickhouse-client --query ''SELECT source, count() FROM vnmd.raw GROUP BY source ORDER BY source''' 2>&1
+foreach ($c in $counts) { Write-Output "rows: $c" }
